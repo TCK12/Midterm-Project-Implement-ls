@@ -1,0 +1,3 @@
+# Các file đối tượng và file thực thi
+*.o
+my_ls
