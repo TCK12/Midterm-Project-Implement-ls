@@ -1,7 +1,7 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -Werror -g
 TARGET = my_ls
-OBJS = main.o options.o core.o display.o
+OBJS = main.o options.o core.o display.o sort.o
 
 all: $(TARGET)
 
