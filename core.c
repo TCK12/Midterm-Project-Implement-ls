@@ -36,7 +36,6 @@ void process_path(const char *path, const LsOptions *opts) {
         return;
     }
 
-    // Nếu path là file đơn lẻ hoặc có cờ -d
     if (!S_ISDIR(st.st_mode) || opts->directory_only) {
         FileInfo info;
         strncpy(info.name, path, sizeof(info.name) - 1);
@@ -52,7 +51,6 @@ void process_path(const char *path, const LsOptions *opts) {
         return;
     }
 
-    // Nếu path là thư mục -> Mở và đọc danh sách các file con
     DIR *dir = opendir(path);
     if (!dir) {
         perror(path);
@@ -64,22 +62,16 @@ void process_path(const char *path, const LsOptions *opts) {
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
-        // Xử lý cờ hiển thị file ẩn (-a / -A)
         if (entry->d_name[0] == '.') {
-            if (!opts->show_all && !opts->show_almost_all) {
-                continue; // Bỏ qua file ẩn nếu không bật -a hoặc -A
-            }
+            if (!opts->show_all && !opts->show_almost_all) continue;
             if (opts->show_almost_all && !opts->show_all) {
-                if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-                    continue; // Bỏ qua . và .. nếu chỉ bật -A
-                }
+                if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
             }
         }
 
         FileInfo info;
         strncpy(info.name, entry->d_name, sizeof(info.name) - 1);
-        
-        // Tạo đường dẫn đầy đủ
+
         if (strcmp(path, "/") == 0) {
             snprintf(info.full_path, sizeof(info.full_path), "/%s", entry->d_name);
         } else {
@@ -95,7 +87,24 @@ void process_path(const char *path, const LsOptions *opts) {
         add_file_info(&list, info);
     }
     closedir(dir);
+
     sort_file_list(&list, opts);
     display_files(&list, opts);
+
+    // XỬ LÝ ĐỆ QUY (-R)
+    if (opts->recursive) {
+        for (int i = 0; i < list.count; i++) {
+            // Bỏ qua . và .. để tránh vòng lặp vô tận
+            if (strcmp(list.files[i].name, ".") == 0 || strcmp(list.files[i].name, "..") == 0) {
+                continue;
+            }
+
+            if (S_ISDIR(list.files[i].statbuf.st_mode) && !S_ISLNK(list.files[i].statbuf.st_mode)) {
+                printf("\n%s:\n", list.files[i].full_path);
+                process_path(list.files[i].full_path, opts);
+            }
+        }
+    }
+
     free_file_list(&list);
 }

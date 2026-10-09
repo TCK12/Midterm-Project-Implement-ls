@@ -5,13 +5,47 @@
 #include <pwd.h>
 #include <grp.h>
 #include <unistd.h>
+#include <ctype.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include "display.h"
 
-// 1. Chuyển đổi mode (st_mode) thành chuỗi 10 ký tự quyền (vd: -rwxr-xr-x)
+// Hàm chuyển đổi kích thước file theo -h hoặc -k
+static void format_size(off_t size, char *buf, size_t buf_size, const LsOptions *opts) {
+    if (opts->human_readable) {
+        const char *units[] = {"B", "K", "M", "G", "T"};
+        double s = (double)size;
+        int unit_idx = 0;
+        while (s >= 1024 && unit_idx < 4) {
+            s /= 1024;
+            unit_idx++;
+        }
+        if (unit_idx == 0) {
+            snprintf(buf, buf_size, "%4lldB", (long long)size);
+        } else {
+            snprintf(buf, buf_size, "%4.1f%s", s, units[unit_idx]);
+        }
+    } else if (opts->kilobyte) {
+        long long kb = (size + 1023) / 1024; // Làm tròn lên KB
+        snprintf(buf, buf_size, "%lldK", kb);
+    } else {
+        snprintf(buf, buf_size, "%lld", (long long)size);
+    }
+}
+
+// In tên file xử lý cờ -q (thay ký tự không in được bằng '?') hoặc -w
+static void print_filename(const char *name, const LsOptions *opts) {
+    for (size_t i = 0; i < strlen(name); i++) {
+        unsigned char c = (unsigned char)name[i];
+        if (opts->hide_non_print || (!opts->raw_non_print && isatty(STDOUT_FILENO) && !isprint(c))) {
+            putchar('?');
+        } else {
+            putchar(c);
+        }
+    }
+}
+
 static void get_mode_string(mode_t mode, char *str) {
-    // Loại file (Character 1)
     if (S_ISDIR(mode))       str[0] = 'd';
     else if (S_ISLNK(mode))  str[0] = 'l';
     else if (S_ISCHR(mode))  str[0] = 'c';
@@ -20,111 +54,82 @@ static void get_mode_string(mode_t mode, char *str) {
     else if (S_ISSOCK(mode)) str[0] = 's';
     else                     str[0] = '-';
 
-    // Quyền của Owner (rwx)
     str[1] = (mode & S_IRUSR) ? 'r' : '-';
     str[2] = (mode & S_IWUSR) ? 'w' : '-';
-    if (mode & S_ISUID) {
-        str[3] = (mode & S_IXUSR) ? 's' : 'S';
-    } else {
-        str[3] = (mode & S_IXUSR) ? 'x' : '-';
-    }
+    str[3] = (mode & S_ISUID) ? ((mode & S_IXUSR) ? 's' : 'S') : ((mode & S_IXUSR) ? 'x' : '-');
 
-    // Quyền của Group (rwx)
     str[4] = (mode & S_IRGRP) ? 'r' : '-';
     str[5] = (mode & S_IWGRP) ? 'w' : '-';
-    if (mode & S_ISGID) {
-        str[6] = (mode & S_IXGRP) ? 's' : 'S';
-    } else {
-        str[6] = (mode & S_IXGRP) ? 'x' : '-';
-    }
+    str[6] = (mode & S_ISGID) ? ((mode & S_IXGRP) ? 's' : 'S') : ((mode & S_IXGRP) ? 'x' : '-');
 
-    // Quyền của Other (rwx)
     str[7] = (mode & S_IROTH) ? 'r' : '-';
     str[8] = (mode & S_IWOTH) ? 'w' : '-';
-    if (mode & S_ISVTX) { // Sticky bit
-        str[9] = (mode & S_IXOTH) ? 't' : 'T';
-    } else {
-        str[9] = (mode & S_IXOTH) ? 'x' : '-';
-    }
+    str[9] = (mode & S_ISVTX) ? ((mode & S_IXOTH) ? 't' : 'T') : ((mode & S_IXOTH) ? 'x' : '-');
 
     str[10] = '\0';
 }
 
-// 2. Định dạng ngày tháng chỉnh sửa gần nhất
 static void get_time_string(const struct stat *st, const LsOptions *opts, char *str, size_t maxsize) {
     time_t t;
-    if (opts->time_status) {
-        t = st->st_ctime;
-    } else if (opts->time_access) {
-        t = st->st_atime;
-    } else {
-        t = st->st_mtime;
-    }
+    if (opts->time_status)       t = st->st_ctime;
+    else if (opts->time_access)  t = st->st_atime;
+    else                         t = st->st_mtime;
 
     struct tm *tm_info = localtime(&t);
-    // Định dạng: Tháng (3 chữ) Ngày Giờ:Phút (vd: Oct 27 14:30)
     strftime(str, maxsize, "%b %e %H:%M", tm_info);
 }
 
-// 3. In một dòng chi tiết theo định dạng ls -l
 static void print_long_entry(const FileInfo *file, const LsOptions *opts) {
     char mode_str[11];
     get_mode_string(file->statbuf.st_mode, mode_str);
 
-    // Lấy User name / Group name hoặc ID
-    char user_str[32];
-    char group_str[32];
-
+    char user_str[32], group_str[32];
     if (opts->numeric_uid_gid) {
         snprintf(user_str, sizeof(user_str), "%u", file->statbuf.st_uid);
         snprintf(group_str, sizeof(group_str), "%u", file->statbuf.st_gid);
     } else {
         struct passwd *pw = getpwuid(file->statbuf.st_uid);
-        if (pw) {
-            strncpy(user_str, pw->pw_name, sizeof(user_str) - 1);
-        } else {
-            snprintf(user_str, sizeof(user_str), "%u", file->statbuf.st_uid);
-        }
+        if (pw) strncpy(user_str, pw->pw_name, sizeof(user_str) - 1);
+        else snprintf(user_str, sizeof(user_str), "%u", file->statbuf.st_uid);
 
         struct group *gr = getgrgid(file->statbuf.st_gid);
-        if (gr) {
-            strncpy(group_str, gr->gr_name, sizeof(group_str) - 1);
-        } else {
-            snprintf(group_str, sizeof(group_str), "%u", file->statbuf.st_gid);
-        }
+        if (gr) strncpy(group_str, gr->gr_name, sizeof(group_str) - 1);
+        else snprintf(group_str, sizeof(group_str), "%u", file->statbuf.st_gid);
     }
 
-    // Định dạng thời gian
     char time_str[64];
     get_time_string(&file->statbuf, opts, time_str, sizeof(time_str));
 
-    // In các thông tin theo đúng thứ tự chuẩn
-    printf("%s %2lu %s %s %8lld %s %s",
+    char size_str[32];
+    format_size(file->statbuf.st_size, size_str, sizeof(size_str), opts);
+
+    printf("%s %2lu %s %s %8s %s ",
            mode_str,
            (unsigned long)file->statbuf.st_nlink,
            user_str,
            group_str,
-           (long long)file->statbuf.st_size,
-           time_str,
-           file->name);
+           size_str,
+           time_str);
 
-    // Nếu là Symbolic Link -> In tên file thực sự mà nó trỏ tới (-> target)
+    print_filename(file->name, opts);
+
     if (S_ISLNK(file->statbuf.st_mode)) {
         char link_target[1024];
         ssize_t len = readlink(file->full_path, link_target, sizeof(link_target) - 1);
         if (len != -1) {
             link_target[len] = '\0';
-            printf(" -> %s", link_target);
+            printf(" -> ");
+            print_filename(link_target, opts);
         }
     }
 
-    // Xử lý cờ -F (phụ gia ký tự phân loại)
     if (opts->classify) {
-        if (S_ISDIR(file->statbuf.st_mode)) printf("/");
-        else if (S_ISLNK(file->statbuf.st_mode)) printf("@");
-        else if (S_ISSOCK(file->statbuf.st_mode)) printf("=");
-        else if (S_ISFIFO(file->statbuf.st_mode)) printf("|");
-        else if (file->statbuf.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) printf("*");
+        mode_t m = file->statbuf.st_mode;
+        if (S_ISDIR(m)) printf("/");
+        else if (S_ISLNK(m)) printf("@");
+        else if (S_ISSOCK(m)) printf("=");
+        else if (S_ISFIFO(m)) printf("|");
+        else if (m & (S_IXUSR | S_IXGRP | S_IXOTH)) printf("*");
     }
 
     printf("\n");
@@ -133,34 +138,23 @@ static void print_long_entry(const FileInfo *file, const LsOptions *opts) {
 void display_files(const FileList *list, const LsOptions *opts) {
     if (list->count == 0) return;
 
-    // Nếu có cờ -l hoặc -n
     if (opts->long_format || opts->numeric_uid_gid) {
-        // Tính tổng số block ổ đĩa đã sử dụng (total)
         long long total_blocks = 0;
         for (int i = 0; i < list->count; i++) {
             total_blocks += list->files[i].statbuf.st_blocks;
         }
         printf("total %lld\n", total_blocks);
 
-        // In chi tiết từng file
         for (int i = 0; i < list->count; i++) {
             print_long_entry(&list->files[i], opts);
         }
     } else {
-        // In ngắn (Mặc định: 1 tên file trên 1 dòng)
         for (int i = 0; i < list->count; i++) {
-            // Xử lý cờ -i (In inode)
-            if (opts->inode) {
-                printf("%lu ", (unsigned long)list->files[i].statbuf.st_ino);
-            }
-            // Xử lý cờ -s (In số block)
-            if (opts->blocks) {
-                printf("%lld ", (long long)list->files[i].statbuf.st_blocks);
-            }
+            if (opts->inode) printf("%lu ", (unsigned long)list->files[i].statbuf.st_ino);
+            if (opts->blocks) printf("%lld ", (long long)list->files[i].statbuf.st_blocks);
 
-            printf("%s", list->files[i].name);
+            print_filename(list->files[i].name, opts);
 
-            // Xử lý cờ -F
             if (opts->classify) {
                 mode_t m = list->files[i].statbuf.st_mode;
                 if (S_ISDIR(m)) printf("/");
